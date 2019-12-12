@@ -8,6 +8,9 @@ Created on Mon Nov 11 19:29:10 2019
 from datetime import datetime, timedelta
 from phue import Bridge
 from itachip2ir import VirtualDevice, iTach
+import logging
+import logging.handlers
+import wifiStat as stat
 import time
 import re
 import requests
@@ -15,12 +18,9 @@ import random
 
 def set_light_time(Brightness, lightid, status, current_brightness):
         if current_brightness != Brightness:
-            if status == False:
-                b.set_light(lightid, 'on',  value=True)
+            if status == True:
                 b.set_light(lightid, 'bri',  value=Brightness)
-                b.set_light(lightid, 'on',  value=False)
-            else:
-                b.set_light(lightid, 'bri',  value=Brightness)
+                
                 
 def get_sun_time(func, file):
     try:
@@ -45,7 +45,7 @@ def cameras_rec(state, number):
         if state == 'off': #turn the camera off we let it know we are here.
             url = 'http://' + parameters[ip] + '/axis-cgi/virtualinput/activate.cgi?schemaversion=1&port=1'
         else:
-            print('not a supported state: ' + state)
+            logger.error("State not supported " + state)
         username = parameters[uname]
         password = parameters[pword]
         requests.get(url, auth=(username, password)).content
@@ -89,12 +89,18 @@ def get_time():
     timing['current_hour:'] = int(timing['current_time:'].strftime('%H'))
     timing['current_minute:'] = int(timing['current_time:'].strftime('%M'))
     timing['current_second:'] = int(timing['current_time:'].strftime('%S'))
+    timing['current_epoch:'] = int(time.time())
 
-def time_passed(marker): #check to see if an hour passed
+def time_passed(marker, hms): #check to see if an hour passed
     t1 = marker
     t2 = datetime.now()
     diff = t2 - t1
-    return int(diff.seconds / 60) # will return the number of minutes passed since the first timestamp
+    if hms == 'm':
+        return int(diff.seconds / 60) # will return the number of minutes passed since the first timestamp
+    if hms == 'h':
+        return int(diff.seconds / 3600) # will return the number of hours passed since the first timestamp
+    else:
+        return int(diff.seconds) # will return the number of seconds passed since the first timestamp
     
 def time_until(time_point):
     t1 = datetime.now()
@@ -107,9 +113,77 @@ def generate_rand(high):
         result = int(random.randint(1,high))
     return result
 
+def future_time(advance):
+    timing['future_time:'] = datetime.now() + timedelta(minutes=int(advance))
+    timing['future_year:'] = int(timing['future_time:'].strftime('%Y'))
+    timing['future_month:'] = int(timing['future_time:'].strftime('%m'))
+    timing['future_day:'] = int(timing['future_time:'].strftime('%d'))
+    timing['future_day_week:'] = int(timing['future_time:'].strftime('%w'))
+    timing['future_hour:'] = int(timing['future_time:'].strftime('%H'))
+    timing['future_minute:'] = int(timing['future_time:'].strftime('%M'))
+    timing['future_second:'] = int(timing['future_time:'].strftime('%S'))
+    
+def day_period(hour):
+    if int(hour) >= 0 and int(hour) < 10:
+        return 0
+    if int(hour) >= 10 and int(hour) < 17:
+        return 1
+    if int(hour) >= 17 and int(hour) <= 23:
+        return 2
+    else:
+        logger.error("Day period Failed!")
+        return 5
+
+class status(object):
+          def indirect(self,i):
+                   state['time_of_change'] = datetime.now()
+                   state['satisfied'] = False # can't get no satisfaction upon change
+                   state['stereo_on'] = False # Reset the state of the stereo off timer
+                   method_name='state_'+str(i)
+                   method=getattr(self,method_name,lambda :1)
+                   return method()
+          def state_0(self):
+                   state['armed'] = bool(True)
+                   state['disarmed'] = bool(False)
+                   state['away'] = bool(False)
+                   state['spare'] = bool(False)
+                   return 0
+          def state_1(self):
+                   state['armed'] = bool(False)
+                   state['disarmed'] = bool(True)
+                   state['away'] = bool(False)
+                   state['spare'] = bool(False)
+                   return 0
+          def state_2(self):
+                   state['armed'] = bool(False)
+                   state['disarmed'] = bool(False)
+                   state['away'] = bool(True)
+                   state['spare'] = bool(False)
+                   return 0
+          def state_3(self):
+                   state['armed'] = bool(False)
+                   state['disarmed'] = bool(False)
+                   state['away'] = bool(False)
+                   state['spare'] = bool(True)
+                   return 0
+
+# function to return key for any value 
+def get_key(val, dictionary): 
+    for key, value in dictionary.items(): 
+         if val == value: 
+             return key 
+    logger.error("Key not found")
+    return 1  
+
+# Setup Logging
+logger = logging.getLogger('Python')
+logger.setLevel(logging.INFO)
+
 # Create a dictionary with the parameters from the config file
 parameters = dict()
 timing = dict()
+state = dict()
+
 fname = './automation.cfg'
 try:
     fh = open(fname)
@@ -126,9 +200,20 @@ for line in fh:
         if parameter_name == '': continue
         else: parameters[parameter_name] = parameters.get(parameter_name,parameter)
 
+#add handler to the logger
+handler = logging.handlers.SysLogHandler(address=(parameters['syslog_ip:'], int(parameters['syslog_port:'])))
+#add formatting to handler
+formatter = logging.Formatter('AutomationController: { "loggerName":"%(name)s", "timestamp":"%(asctime)s", "pathName":"%(pathname)s", "logRecordCreationTime":"%(created)f", "functionName":"%(funcName)s", "levelNo":"%(levelno)s", "lineNo":"%(lineno)d", "time":"%(msecs)d", "levelName":"%(levelname)s", "message":"%(message)s"}')
+handler.formatter = formatter
+logger.addHandler(handler)
+
 #Get initial time for setup
 get_time()
+logger.info("Controller Started")
 
+#Get initial period
+period = int(day_period(timing['current_hour:'])) # 0 Morning, 1 Afternoon, 2 Evening, 5 Oh Shit
+logger.info("Starting Period " + str(period))
 # Establish sunrise and sunset times from the files indicated in the config file setup
 timing['sunrise_time:'] = get_sun_time('Sunrise', parameters['Sunrise:'])
 timing['sunrise_hour:'] = int(str(timing['sunrise_time:'])[:-2])
@@ -151,6 +236,72 @@ b.connect()
 
 # Get the light information from the bridge and store it in a dictionary based on ID as the key.
 lights = b.get_light_objects(mode='id')
+
+#seccode = stat.login(parameters['wifistat_ip:'], int(parameters['wifistat_port:']), parameters['wifistat_password:'])
+#stat.set_time(parameters['wifistat_ip:'], int(parameters['wifistat_port:']), seccode, str(timing['current_epoch:']))
+#stat.send_schedule(parameters['wifistat_ip:'], int(parameters['wifistat_port:']), seccode, '5', 'W,7,00,67,70;L,10,0,67,70;R,18,0,67,70;S,22,0,60,65' )
+
+#setting a time in the future for events that get run via CRON Use Minutes in integer value
+#future_time(30)
+
+shat = int(0)
+st = status()
+st.indirect(shat)
+while(True):
+    if state['satisfied'] == False: # If there was a change, fall into this block of code
+        if get_key(True,state) == 'armed': # The change was to arm the system (away mode)
+            for lightid,attribute in lights.items(): # Shut shit down
+                b.set_light( lightid, 'on', False)
+            motion_detect('on', parameters['number_motion:']) #Turn motion detectors on
+            state['stereo_on'] = True # assume the stereo is on, start the off timer 
+            cameras_rec('on', parameters['number_cameras:']) #Start recording
+        state['satisfied'] = True # The program has satisfied the change condition
+        if get_key(True,state) == 'disarmed': # The change was to disarm the system
+            cameras_rec('off', parameters['number_cameras:']) #Stop the cameras from recording
+            motion_detect('off', parameters['number_motion:']) #Turn motion detectors off
+            if period == 0: #morning
+                b.set_light( [6,7,8,10], 'on', True) # Turn on the livingRoom, Bathroom and Kitchen lights
+                time.sleep(1) # Give the bridge a second to update all the statuses
+                lights = b.get_light_objects(mode='id') # Pull the latest status
+                for lightid,attribute in lights.items(): # Set everything to full brightness
+                    if attribute.type == ("Dimmable light" or "Extended color light"): #Keep from trying to set attributes to on/off switches
+                        set_light_time(254, lightid, attribute.on, attribute.brightness)
+            if period == 1: #afternoon
+                pass # nothing else to do place holder
+            if period == 2: #evening
+                b.set_light( [6,7], 'on', True)
+    if timing['current_hour:'] > int(18) and timing['current_hour:'] < int(22):
+        timestamp1800 = datetime(year=timing['current_year:'], month=timing['current_month:'], day=timing['current_day:'], hour=18, minute=0, second=0)
+        brightness_dim = int(254 - time_passed(timestamp1800, 'm'))
+        lights = b.get_light_objects(mode='id') # Pull the latest status
+        for lightid,attribute in lights.items():
+            if attribute.type == ("Dimmable light" or "Extended color light"): #Keep from trying to set attributes to on/off switches
+                set_light_time(brightness_dim, lightid, attribute.on, attribute.brightness)
+        
+    else:
+        get_time()
+        period = int(day_period(timing['current_hour:'])) # 0 Morning, 1 Afternoon, 2 Evening, 5 Oh Shit
+        break
+
+# testing to get the key that has changed
+#shat = int(2)
+#st = status()
+#st.indirect(shat)
+#print(get_key(True,state))
+
+# testing of state switching
+#while(True):
+#    shat = int(input('state:'))
+#    st = status()
+#    st.indirect(shat)
+#    print(state['time_of_change'])
+#    print(state['wake'])
+#    print(state['sleep'])
+#    print(state['away_wake'])
+#    print(state['away_sleep'])
+
+# Calculate time until action
+#print(time_until(timing['sunrise_timestamp:']))
 
 # Calculate time since an action
 #device = str('sheisse')
@@ -177,13 +328,10 @@ lights = b.get_light_objects(mode='id')
 #set lights to alert mode change lselect to select to turn off
 #b.set_light( [1,2,3,4,5,6,7,8], 'alert', 'lselect')
 
+# Get the brightness of a light
+# alight = b.get_light(4, 'bri')
+
 #Changing the light brightness for all lights
 #for lightid,attribute in lights.items():
-#    print(lightid)
-#    print(attribute.name)
-#    print(attribute.on)
-#    print(attribute.type)
 #    if attribute.type == ("Dimmable light" or "Extended color light"): #Keep from trying to set attributes to on/off switches
-#        print(attribute.brightness)
-#        print(datetime.now().strftime('%H'))
-#        set_light_time(255, lightid, attribute.on, attribute.brightness)
+#        set_light_time(144, lightid, attribute.on, attribute.brightness)
